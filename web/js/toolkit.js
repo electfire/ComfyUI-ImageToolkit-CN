@@ -12,11 +12,10 @@
  *      不重跑工作流、不进队列。
  *   4) 同节点常驻一块「保存记录」面板（方案 B）：
  *      最近 5 条保存记录（时间 · 张数 · 文件名 · 文件夹），
- *      点击任意行打开该次保存的图片；除「保存方式」外的
+ *      点击任意行直接弹出该次保存的图片预览；除「保存方式」外的
  *      保存参数默认折叠，需要时从面板右上角或右键菜单展开。
- *      面板是一个固定高度的自定义控件，位于按钮下方、图片预览
- *      上方：预览图出现/消失时由布局引擎自行调整节点高度，
- *      面板位置稳定、可点击，节点不会无限变高。
+ *      面板是控件区最后一个控件（图片预览下方），高度固定；图片预览
+ *      保持原生弹性，拖动节点时图片跟着缩放，面板位置始终在最底部。
  */
 
 const ITK_APP =
@@ -207,15 +206,20 @@ function itkToast(message, type) {
     }
 }
 
-/* ==================================================================
+/**
  * 保存记录面板（图像批量保存 · 方案 B）
  * ------------------------------------------------------------------
  * 节点常驻一块只读状态区，记录最近 5 次保存：
- *     时间 · 张数 · 目标文件夹 · 总大小
- *   · 点击任意记录行 → 打开该次保存的图片（缩略图弹层，点缩略图看原图）
+ *     时间 · 张数 · 文件名 · 目标文件夹
+ *   · 点击任意记录行 → 直接弹出该次保存的图片预览
  *   · 自动保存（每次执行后自动保存）执行完会自动多出一条记录
  *   · 自动保存的目标文件夹取路径最后一段显示，完整路径在弹层标题里
  *   · 面板右上角（或节点右键菜单）可折叠 / 展开全部保存参数
+ *
+ * 布局结构（从上到下）：保存参数 → 「保存当前结果」按钮 → 图片预览 → 本面板。
+ * 面板是节点控件区的最后一个控件（图片预览是执行后才挂上来的，
+ * 所以面板每帧绘制时会校正自己的位置），高度固定为记录行数对应的高度；
+ * 图片预览保持原生弹性，拖动节点尺寸时图片跟着缩放。
  * ================================================================== */
 
 const ITK_HISTORY_PROP = "itk_save_history";   // 随工作流保存
@@ -288,21 +292,50 @@ function itkAddSaveRecord(node, rec) {
         files: Array.isArray(rec.files) ? rec.files.slice(0, ITK_FILES_PER_REC) : [],
     });
     while (hist.length > ITK_HISTORY_MAX) hist.shift();
-    // 面板是固定高度的自定义控件：高度随行数变化，写回控件并打个脏标记，
-    // 下一帧布局引擎（_arrangeWidgets）会按新高度重排
-    const panelW = node.__itkPanelWidget;
-    if (panelW) {
-        panelW.__itkPanelH = itkPanelHeight(node);
-        panelW.computedHeight = panelW.__itkPanelH;
-    }
-    try { node._widgetSlotsDirty = true; } catch (e) { /* 忽略 */ }
-    if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+    // 面板高度随行数变化，刷新布局（重排由前端布局引擎在下一帧完成）
+    itkLayoutRefresh(node);
 }
 
-/** 面板高度（固定高度控件：minHeight = maxHeight，布局引擎不会给它塞额外空间） */
+/** 面板高度（随记录行数变化；面板是可伸缩控件，这是下限） */
 function itkPanelHeight(node) {
     const rows = Math.max(1, itkHistory(node).length);
     return ITK_PANEL.headerH + rows * ITK_PANEL.rowH + 4;
+}
+
+const ITK_PREVIEW_NAME = "$$canvas-image-preview";
+
+/**
+ * 面板布局维护：
+ *   1. 把面板挪到控件区末尾（图片预览下面）——预览控件是执行后才挂到
+ *      node.widgets 上的，挂上来时排在面板后面，所以每帧都要校正一次；
+ *   2. 面板保持固定高度（高度下限 = 内容高度），图片预览则保持原生弹性：
+ *      拖动节点时图片跟着缩放，面板只在节点底部占一条固定高度的带。
+ *   3. 有变化时打个布局脏标记，让前端布局引擎下一帧重排。
+ */
+function itkLayoutRefresh(node) {
+    const panel = node.__itkPanelWidget;
+    const ws = node.widgets || [];
+    if (!panel) return;
+    let changed = false;
+
+    // 面板挪到最后（预览是执行后才挂上去的，所以每帧都要校正）
+    const i = ws.indexOf(panel);
+    if (i !== -1 && i !== ws.length - 1) {
+        ws.splice(i, 1);
+        ws.push(panel);
+        changed = true;
+    }
+
+    const newH = itkPanelHeight(node);
+    if (panel.__itkPanelH !== newH) {
+        panel.__itkPanelH = newH;
+        changed = true;
+    }
+
+    if (changed) {
+        try { node._widgetSlotsDirty = true; } catch (e) { /* 忽略 */ }
+        if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+    }
 }
 
 /**
@@ -316,17 +349,19 @@ function itkDrawPanel(widget, node, ctx, w, top) {
     const innerW = Math.max(60, w - ITK_PANEL.padX * 2);
     const rowN = Math.max(1, hist.length);
     const panelH = ITK_PANEL.headerH + rowN * ITK_PANEL.rowH + 4;
+    // 面板是固定高度控件（min = max），布局引擎给的 computedHeight 就等于 panelH
+    const boxH = Math.max(panelH, widget.computedHeight || 0);
 
     ctx.save();
     ctx.font = ITK_PANEL.font;
     ctx.textBaseline = "middle";
 
-    // 背板
+    // 背板（铺满控件被分配到的整个高度）
     ctx.fillStyle = "rgba(16,16,20,0.4)";
     ctx.strokeStyle = "#46464f";
     ctx.lineWidth = 1;
-    ctx.fillRect(ITK_PANEL.padX, top, innerW, panelH);
-    ctx.strokeRect(ITK_PANEL.padX + 0.5, top + 0.5, innerW - 1, panelH - 1);
+    ctx.fillRect(ITK_PANEL.padX, top, innerW, boxH);
+    ctx.strokeRect(ITK_PANEL.padX + 0.5, top + 0.5, innerW - 1, boxH - 1);
 
     // 标题 + 折叠开关
     ctx.textAlign = "left";
@@ -411,6 +446,22 @@ function itkViewUrl(entry, preview) {
     return (api && typeof api.apiURL === "function") ? api.apiURL(rel) : rel;
 }
 
+/**
+ * 缩略图 URL：走插件自己的 /imagetoolkit/view/thumb 路由，服务端真正缩小到
+ * size 像素再返回 webp（/view 的 preview 参数其实是质量不是尺寸，不适合做大图预览）。
+ */
+function itkThumbUrl(entry, size) {
+    const api = window.comfyAPI && window.comfyAPI.api;
+    const q = new URLSearchParams({
+        filename: (entry && entry.filename) || "",
+        subfolder: (entry && entry.subfolder) || "",
+        type: (entry && entry.type) || "output",
+        size: String(size || 448),
+    });
+    const rel = "imagetoolkit/view/thumb?" + q.toString();
+    return (api && typeof api.apiURL === "function") ? api.apiURL(rel) : "/" + rel;
+}
+
 function itkOpenSavePopup(node, rec, e) {
     if (!rec) return;
     itkCloseSavePopup();
@@ -420,7 +471,7 @@ function itkOpenSavePopup(node, rec, e) {
     pop.style.cssText = ("position:fixed;z-index:100000;background:#26262b;color:#e6e6ec;" +
         "border:1px solid #555560;border-radius:8px;padding:10px 12px;" +
         "box-shadow:0 10px 34px rgba(0,0,0,0.55);font:12px Microsoft YaHei,sans-serif;" +
-        "max-width:600px;max-height:72vh;overflow:auto");
+        "max-width:min(1080px,92vw);max-height:86vh;overflow:auto");
 
     // 点弹层本身不要冒泡到全局关闭逻辑
     pop.addEventListener("pointerdown", (ev) => ev.stopPropagation());
@@ -447,31 +498,31 @@ function itkOpenSavePopup(node, rec, e) {
         pop.appendChild(empty);
     } else {
         const grid = document.createElement("div");
-        grid.style.cssText = "display:flex;flex-wrap:wrap;gap:8px";
+        grid.style.cssText = "display:flex;flex-wrap:wrap;gap:10px";
         files.forEach((entry) => {
             const box = document.createElement("a");
             box.href = itkViewUrl(entry);
             box.target = "_blank";
             box.rel = "noopener";
             box.title = entry.filename || "";
-            box.style.cssText = "display:block;width:96px;text-decoration:none;color:#8f9aa8;text-align:center";
+            box.style.cssText = "display:block;width:224px;text-decoration:none;color:#8f9aa8;text-align:center";
             const img = document.createElement("img");
-            img.src = itkViewUrl(entry, 192);
+            img.src = itkThumbUrl(entry, 448);
             img.alt = entry.filename || "";
-            img.style.cssText = "width:96px;height:96px;object-fit:contain;" +
+            img.style.cssText = "width:224px;height:224px;object-fit:contain;" +
                 "background:#1c1c20;border:1px solid #444;border-radius:4px;display:block";
             img.onerror = () => {
                 img.style.display = "none";
                 const ph = document.createElement("div");
                 ph.textContent = entry.filename || "";
-                ph.style.cssText = ("width:96px;height:96px;font-size:10px;line-height:1.2;" +
+                ph.style.cssText = ("width:224px;height:224px;font-size:11px;line-height:1.3;" +
                     "overflow:hidden;background:#1c1c20;border:1px solid #444;border-radius:4px");
                 if (img.nextSibling) box.insertBefore(ph, img.nextSibling);
                 else box.appendChild(ph);
             };
             box.appendChild(img);
             const cap = document.createElement("div");
-            cap.style.cssText = "font-size:10px;max-width:96px;overflow:hidden;" +
+            cap.style.cssText = "font-size:11px;max-width:224px;overflow:hidden;" +
                 "text-overflow:ellipsis;white-space:nowrap";
             cap.textContent = entry.filename || "";
             box.appendChild(cap);
@@ -481,13 +532,13 @@ function itkOpenSavePopup(node, rec, e) {
         if (rec.count && rec.count > files.length) {
             const more = document.createElement("div");
             more.style.cssText = "margin-top:8px;color:#888;font-size:11px";
-            more.textContent = `（缩略图仅显示前 ${files.length} 张，共 ${rec.count} 张）`;
+            more.textContent = `（仅显示前 ${files.length} 张，共 ${rec.count} 张；点图片可打开原图）`;
             pop.appendChild(more);
         }
     }
 
     // 锚点在点击处附近，避免越出视口
-    const x = Math.min((e && e.clientX) || 200, Math.max(8, window.innerWidth - 620));
+    const x = Math.min((e && e.clientX) || 200, Math.max(8, window.innerWidth - 1100));
     const y = Math.min((e && e.clientY) || 120, Math.max(8, window.innerHeight - 180));
     pop.style.left = Math.max(8, x + 8) + "px";
     pop.style.top = Math.max(8, y + 6) + "px";
@@ -517,33 +568,48 @@ function itkSetFold(node, folded) {
 
 /**
  * 面板点击：走控件的 onPointerDown(pointer, node, canvas) 入口。
- * canvas.graph_mouse 是世界坐标，换算回节点局部坐标后再做命中。
+ * 命中判断直接按行高算术计算（行高固定），不依赖绘制缓存的 __itkRows ——
+ * 即使布局/绘制暂时没跟上，每一行也都能点开图片。
  * 返回 true 表示事件已被面板吃掉。
  */
 function itkPanelClick(widget, node, canvas, pointer) {
     const ev = pointer && pointer.eDown;
     if (ev && ev.button !== undefined && ev.button !== 0) return false;   // 只响应左键
-    const gx = (canvas && canvas.graph_mouse && canvas.graph_mouse[0]) || 0;
-    const gy = (canvas && canvas.graph_mouse && canvas.graph_mouse[1]) || 0;
+    // 优先用事件自带的画布坐标，回退到 graph_mouse
+    let gx = ev && Number(ev.canvasX);
+    let gy = ev && Number(ev.canvasY);
+    if (!(gx >= 0) || !(gy >= 0)) {
+        gx = (canvas && canvas.graph_mouse && canvas.graph_mouse[0]) || 0;
+        gy = (canvas && canvas.graph_mouse && canvas.graph_mouse[1]) || 0;
+    }
     const lx = gx - node.pos[0];
     const ly = gy - node.pos[1];
 
-    const rows = widget.__itkRows;
-    if (rows) {
-        for (let i = 0; i < rows.length; i++) {
-            const r = rows[i];
-            if (lx >= r.x && lx <= r.x + r.w &&
-                ly >= r.y && ly <= r.y + r.h) {
-                itkOpenSavePopup(node, r.rec, ev);
-                return true;
-            }
-        }
-    }
+    // 面板顶沿：布局引擎每帧都会把控件 y 写进 last_y / y
+    const top = (widget.last_y !== undefined ? widget.last_y : widget.y) || 0;
+    const w = node.size[0] || 0;
+    const hist = itkHistory(node);
+    const rowsN = Math.max(1, hist.length);
+
+    // 折叠开关：右上角（绘制时量过宽度，没量到就用一个保守宽度）
     const fb = widget.__itkFoldBtn;
-    if (fb && lx >= fb.x && lx <= fb.x + fb.w &&
-        ly >= fb.y && ly <= fb.y + fb.h) {
+    const fbW = (fb && fb.w) || 92;
+    if (lx >= w - ITK_PANEL.padX - 4 - fbW && lx <= w - ITK_PANEL.padX - 4 &&
+        ly >= top && ly <= top + ITK_PANEL.headerH) {
         itkSetFold(node, !node.__itkFolded);
         return true;
+    }
+
+    // 记录行：top + headerH 起，每行 rowH
+    const rowsTop = top + ITK_PANEL.headerH;
+    if (hist.length && lx >= ITK_PANEL.padX && lx <= w - ITK_PANEL.padX &&
+        ly >= rowsTop && ly < rowsTop + rowsN * ITK_PANEL.rowH) {
+        const idx = Math.floor((ly - rowsTop) / ITK_PANEL.rowH);
+        const rec = hist[idx];
+        if (rec) {
+            itkOpenSavePopup(node, rec, ev);
+            return true;
+        }
     }
     // 点在面板空白处也让事件到此为止，避免误触发节点拖拽
     return true;
@@ -655,6 +721,8 @@ function itkSetupSaveButton(node) {
             const stat = output && output.savestat;
             const statEntry = Array.isArray(stat) ? stat[0] : stat;
             if (statEntry && statEntry.count) itkAddSaveRecord(this, statEntry);
+            // 图片预览控件在执行后才挂上来：把面板挪到它下面、冻结预览高度
+            itkLayoutRefresh(this);
         } catch (e) { /* 忽略 */ }
         return prevExecuted ? prevExecuted.apply(this, arguments) : undefined;
     };
@@ -663,9 +731,9 @@ function itkSetupSaveButton(node) {
     const btn = node.addWidget("button", "保存当前结果", "保存", () => itkSaveNow(node));
     btn.serialize = false;
 
-    // 「保存记录」面板：一个固定高度的自定义控件（minHeight === maxHeight，
-    // 布局引擎既不会给它分配额外空间、也不会漏掉它的高度），排在按钮下面、
-    // 图片预览控件上面。图片预览出现/消失引起的节点高度变化由布局引擎自理。
+    // 「保存记录」面板：一个固定高度的自定义控件（min === max，布局引擎
+    // 不会给它塞额外空间），排在控件区末尾（图片预览下方）。图片预览保持
+    // 原生弹性：拖动节点时图片跟着缩放，面板只在底部占一条固定高度的带。
     const panel = node.addCustomWidget({
         type: "itk_save_panel",
         name: "保存记录",
@@ -679,6 +747,8 @@ function itkSetupSaveButton(node) {
             return { minHeight: this.__itkPanelH, maxHeight: this.__itkPanelH, minWidth: 1 };
         },
         draw(ctx, self, width, y, h, showText) {
+            // 每帧先校正一下位置（图片预览可能在这之后才被挂上来）
+            itkLayoutRefresh(self);
             itkDrawPanel(this, self, ctx, width, y);
         },
         onPointerDown(pointer, self, canvas) {
@@ -686,6 +756,7 @@ function itkSetupSaveButton(node) {
         },
     });
     node.__itkPanelWidget = panel;
+    itkLayoutRefresh(node);
 
     // 悬停高亮：节点级鼠标移动里顺带算一下面板的命中
     const prevMove = node.onMouseMove;
@@ -799,7 +870,14 @@ function itkSetup(node, rules, typeName) {
             if (own) {
                 node.__itkSelfSize = null;
             } else if (node.__itkReady && size && size[0] && size[1]) {
-                itkLockSize(node, size[0], size[1]);     // 锁定，写进工作流 properties
+                // 布局引擎按内容自动撑高节点时也会回调 onResize（l = 内容高度），
+                // 那不算手动调整：只有高度明显偏离内容高度时才锁定
+                let autoH = ITK_MIN_H;
+                try {
+                    const cs = node.computeSize();
+                    if (cs && cs[1]) autoH = cs[1];
+                } catch (e) { /* 忽略 */ }
+                if (Math.abs(size[1] - autoH) > 4) itkLockSize(node, size[0], size[1]);   // 锁定，写进工作流 properties
             }
             return prevResize ? prevResize.apply(this, arguments) : undefined;
         };

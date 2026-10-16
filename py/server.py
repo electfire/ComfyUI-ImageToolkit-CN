@@ -10,9 +10,11 @@
 import os
 import shutil
 import time
+from io import BytesIO
 
 import folder_paths
 from aiohttp import web
+from PIL import Image
 from server import PromptServer
 
 from .core import safe_name
@@ -86,6 +88,31 @@ def save_now(params):
     }
 
 
+def _thumb_path(params):
+    """根据前端输出的 {filename, subfolder, type} 还原磁盘路径（带越界保护）。"""
+    root = (folder_paths.get_temp_directory()
+            if params.get("type") == "temp"
+            else folder_paths.get_output_directory())
+    sub = params.get("subfolder") or ""
+    fname = os.path.basename(params.get("filename") or "")
+    if not fname:
+        return None
+    target = os.path.normpath(os.path.join(root, sub, fname))
+    if os.path.commonpath((os.path.abspath(target), os.path.abspath(root))) != os.path.abspath(root):
+        return None
+    return target if os.path.isfile(target) else None
+
+
+def make_thumbnail(path, size=512, quality=85):
+    """生成缩略图字节流（webp）。大图不会再整张传给前端。"""
+    with Image.open(path) as im:
+        im = im.convert("RGBA") if im.mode == "RGBA" else im.convert("RGB")
+        im.thumbnail((size, size))
+        buf = BytesIO()
+        im.save(buf, format="WEBP", quality=quality, method=4)
+        return buf.getvalue()
+
+
 def add_routes():
     """注册路由。在插件 __init__ 里调用一次即可。"""
     routes = PromptServer.instance.routes
@@ -103,3 +130,30 @@ def add_routes():
             return web.json_response({"ok": False, "error": str(ex)}, status=500)
         status = 200 if result.get("ok") else 400
         return web.json_response(result, status=status)
+
+    @routes.get("/imagetoolkit/view/thumb")
+    async def _view_thumb(request):
+        """缩略图：?filename=..&subfolder=..&type=output&size=512"""
+        q = request.rel_url.query
+        try:
+            size = max(64, min(1024, int(q.get("size") or 512)))
+        except ValueError:
+            size = 512
+        path = _thumb_path({
+            "filename": q.get("filename") or "",
+            "subfolder": q.get("subfolder") or "",
+            "type": q.get("type") or "output",
+        })
+        if not path:
+            return web.Response(status=404)
+        try:
+            body = make_thumbnail(path, size)
+        except Exception as ex:
+            print(f"[图像工具箱] 缩略图生成失败：{ex}")
+            return web.Response(status=500)
+        return web.Response(
+            body=body,
+            content_type="image/webp",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
