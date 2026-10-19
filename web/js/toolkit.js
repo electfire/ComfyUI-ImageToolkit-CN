@@ -654,6 +654,10 @@ async function itkSaveNow(node) {
             "子文件夹名称": itkWidgetValue(node, "子文件夹名称") || "批量导出",
             "文件夹策略": itkWidgetValue(node, "文件夹策略") || "自动新建（重名加序号）",
             "同名文件处理": itkWidgetValue(node, "同名文件处理") || "覆盖",
+            "文件命名": itkWidgetValue(node, "文件命名") || "保持原文件名",
+            "自定义前缀": itkWidgetValue(node, "自定义前缀") || "图片_",
+            "序号起始": itkWidgetValue(node, "序号起始"),
+            "序号位数": itkWidgetValue(node, "序号位数"),
             "files": files,
         };
 

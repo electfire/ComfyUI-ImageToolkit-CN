@@ -8,6 +8,7 @@
 """
 
 import os
+import re
 import shutil
 import time
 from io import BytesIO
@@ -27,6 +28,36 @@ def _file_path(entry):
             if entry.get("type") == "temp"
             else folder_paths.get_output_directory())
     return os.path.join(root, entry.get("subfolder", ""), entry.get("filename", ""))
+
+
+_SEQ_TAIL = re.compile(r"^\d+$")
+
+
+def _next_seq(target, prefix, start):
+    """扫描目标文件夹里已有的「前缀+纯数字」文件名，返回下一个可用序号。
+
+    这样「纯序号 / 自定义前缀 + 序号」在固定文件夹里连续保存时会接着
+    已有最大序号往下排（001、002、003……），而不是每次从起始值重来、
+    再被同名去重成 001_1、001_2。
+    """
+    mx = None
+    try:
+        names = os.listdir(target)
+    except OSError:
+        names = []
+    for name in names:
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if prefix:
+            if not stem.startswith(prefix):
+                continue
+            tail = stem[len(prefix):]
+        else:
+            tail = stem
+        if not _SEQ_TAIL.match(tail):
+            continue
+        n = int(tail)
+        mx = n if mx is None else max(mx, n)
+    return start if mx is None else max(start, mx + 1)
 
 
 def save_now(params):
@@ -53,12 +84,39 @@ def save_now(params):
     used = set()
     written = []
     total = 0
+
+    # 序号命名：以目标文件夹里已有的最大序号为起点继续编号
+    naming = params.get("文件命名") or "保持原文件名"
+    seq_mode = naming in ("纯序号", "自定义前缀 + 序号")
+    if seq_mode:
+        if naming == "自定义前缀 + 序号":
+            prefix = safe_name(params.get("自定义前缀") or "", "图片_")
+        else:
+            prefix = ""
+        try:
+            digits = max(1, min(8, int(params.get("序号位数") or 4)))
+        except (TypeError, ValueError):
+            digits = 4
+        try:
+            start = max(0, int(params.get("序号起始") or 0))
+        except (TypeError, ValueError):
+            start = 0
+        seq_next = _next_seq(target, prefix, start)
+
     for entry in files:
         src = _file_path(entry)
         if not os.path.isfile(src):
             continue
         fname = safe_name(entry.get("filename") or "", "image.png")
-        if dup == "自动加序号":
+        if seq_mode:
+            stem, dot, ext = fname.rpartition(".")
+            ext = ext if dot else "png"
+            while True:
+                fname = f"{prefix}{seq_next:0{digits}d}.{ext}"
+                seq_next += 1
+                if fname.lower() not in used and not os.path.exists(os.path.join(target, fname)):
+                    break
+        elif dup == "自动加序号":
             final, n = fname, 1
             stem, dot, ext = fname.rpartition(".")
             while final.lower() in used or os.path.exists(os.path.join(target, final)):
