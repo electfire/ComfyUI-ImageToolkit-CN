@@ -131,7 +131,8 @@ class BatchImageSaverCN:
 
         base = safe_name(子文件夹名称, "批量导出")
         # 先把结果落到 ComfyUI 临时目录（前端按 type=temp 预览，不进 output）
-        temp_target = _unique_dir(folder_paths.get_temp_directory(), f"暂存_{time.strftime('%Y%m%d_%H%M%S')}")
+        temp_root = folder_paths.get_temp_directory()
+        os.makedirs(temp_root, exist_ok=True)
 
         force_format = None
         if 输出格式 != "跟随上游":
@@ -143,8 +144,8 @@ class BatchImageSaverCN:
         start = max(0, int(序号起始))
         saved = 0
         results = []
+        used = set()
 
-        os.makedirs(temp_target, exist_ok=True)
         for i, item in enumerate(items):
             # 1) 决定文件字节与扩展名
             data = item.get("data")
@@ -157,7 +158,7 @@ class BatchImageSaverCN:
                 ext = "png"
                 data = encode_image(tensor_to_pil(item["image"]), "PNG", 质量)
 
-            # 2) 决定文件名
+            # 2) 决定文件名（直接落在 temp 根目录，不再建子文件夹）
             stem = safe_name(item.get("name") or "", f"image_{i + 1:05d}")
             if 文件命名 == "保持原文件名":
                 fname = stem
@@ -169,7 +170,17 @@ class BatchImageSaverCN:
                 fname = f"{start + i:0{digits}d}"
 
             fname = safe_name(fname, f"image_{i + 1:05d}")
-            file_path = os.path.join(temp_target, f"{fname}.{ext}")
+            final_name, n = fname, 1
+            while True:
+                candidate = f"{final_name}.{ext}"
+                if (candidate.lower() not in used
+                        and not os.path.exists(os.path.join(temp_root, candidate))):
+                    break
+                final_name = f"{fname}_{n}"
+                n += 1
+            fname = f"{final_name}.{ext}"
+            used.add(fname.lower())
+            file_path = os.path.join(temp_root, fname)
 
             # 3) 需要的话把工作流信息写进文件
             if meta:
@@ -182,8 +193,8 @@ class BatchImageSaverCN:
             saved += 1
 
             results.append({
-                "filename": f"{fname}.{ext}",
-                "subfolder": os.path.relpath(temp_target, folder_paths.get_temp_directory()).replace("\\", "/"),
+                "filename": fname,
+                "subfolder": "",
                 "type": "temp",
             })
 
@@ -234,7 +245,7 @@ class BatchImageSaverCN:
             else:
                 print(f"[图像工具箱] 自动保存失败（{done.get('error')}），结果仍在临时目录，可点按钮重试")
 
-        lines = [f"已暂存 {saved} 张图片（临时目录，未进 output）"]
+        lines = [f"已暂存 {saved} 张图片到：{temp_root}（临时目录，未进 output）"]
         print("[图像工具箱] 已暂存结果：" + lines[0] + "，可在节点上点击「保存当前结果」按钮落盘")
 
         return {
@@ -243,6 +254,6 @@ class BatchImageSaverCN:
                 "text": lines,
                 "snapshot": [{"files": results}],
             },
-            "result": (temp_target, saved),
+            "result": (temp_root, saved),
         }
 

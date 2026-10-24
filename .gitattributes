@@ -1,0 +1,6 @@
+# 统一所有文本文件使用 LF 换行符（Windows 下 checkout 时可按需转换）
+* text=auto
+
+# 明确指定需要 CRLF 的 Windows 文件（可选，这里暂不强制 CRLF）
+# *.cmd text eol=crlf
+# *.bat text eol=crlf
